@@ -24,8 +24,8 @@ These are the things where deviation produces silent failures or broken output. 
 3. **30ms audio fades at every segment boundary** (`afade=t=in:st=0:d=0.03,afade=t=out:st={dur-0.03}:d=0.03`). Otherwise audible pops at every cut.
 4. **Overlays use `setpts=PTS-STARTPTS+T/TB`** to shift the overlay's frame 0 to its window start. Otherwise you see the middle of the animation during the overlay window.
 5. **Master SRT uses output-timeline offsets**: `output_time = word.start - segment_start + segment_offset`. Otherwise captions misalign after segment concat.
-6. **Never cut inside a word.** Snap every cut edge to a word boundary from the Scribe transcript.
-7. **Pad every cut edge.** Working window: 30–200ms. Scribe timestamps drift 50–100ms — padding absorbs the drift. Tighter for fast-paced, looser for cinematic.
+6. **Never cut inside a word.** Snap every cut edge to a word boundary from the transcript.
+7. **Pad every cut edge.** Working window: 30–200ms. ASR timestamps can drift 50–100ms — padding absorbs the drift. Tighter for fast-paced, looser for cinematic.
 8. **Word-level verbatim ASR only.** Never SRT/phrase mode (loses sub-second gap data). Never normalized fillers (loses editorial signal).
 9. **Cache transcripts per source.** Never re-transcribe unless the source file itself changed.
 10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
@@ -45,7 +45,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
     ├── project.md               ← memory; appended every session
     ├── takes_packed.md          ← phrase-level transcripts, the LLM's primary reading view
     ├── edl.json                 ← cut decisions
-    ├── transcripts/<name>.json  ← cached raw Scribe JSON
+    ├── transcripts/<name>.json  ← cached raw transcription JSON
     ├── animations/slot_<id>/    ← per-animation source + render + reasoning
     ├── clips_graded/            ← per-segment extracts with grade + fades
     ├── master.srt               ← output-timeline subtitles
@@ -59,7 +59,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 
 First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
 
-- `ELEVENLABS_API_KEY` resolves — either in the environment or in `.env` at the video-use repo root. If missing, ask the user to paste one and write it to `.env` (never to the user's `<videos_dir>`).
+- `GROQ_API_KEY` resolves — either in the environment or in `.env` at the video-use repo root. This local install defaults to `TRANSCRIPTION_BACKEND=groq`. ElevenLabs remains available only if explicitly requested.
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - Node.js + npm available if the session needs HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
@@ -71,7 +71,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 
 ## Helpers
 
-- **`transcribe.py <video>`** — single-file Scribe call. `--num-speakers N` optional. Cached.
+- **`transcribe.py <video>`** — single-file Groq Whisper call by default. `--backend elevenlabs` is available as a fallback. Cached.
 - **`transcribe_batch.py <videos_dir>`** — 4-worker parallel transcription. Use for multi-take.
 - **`pack_transcripts.py --edit-dir <dir>`** — `transcripts/*.json` → `takes_packed.md` (phrase-level, break on silence ≥ 0.5s).
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
@@ -108,6 +108,63 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 - **Silence gaps are cut candidates.** Silences ≥400ms are usually the cleanest. 150–400ms phrase boundaries are usable with a visual check. <150ms is unsafe (mid-phrase).
 - **Example cut padding** (the launch video shipped with this): 50ms before the first kept word, 80ms after the last. Tighter for montage energy, looser for documentary. Stay in the 30–200ms working window (Hard Rule 7).
 - **Never reason audio and video independently.** Every cut must work on both tracks.
+
+## Reels / Shorts from long Zoom recordings
+
+When the user gives approximate timestamps from a long call and asks for vertical
+Reels, treat the timestamps as **search anchors**, not final cut points.
+
+Workflow:
+
+1. Extract a temporary ASR window around each requested anchor: usually
+   `approx_start - 8s` through `approx_end + 8s`. Put these in
+   `<edit>/reels_windows/`; they are working files only.
+2. Transcribe the windows with Groq by default:
+   `transcribe_batch.py <windows_dir> --edit-dir <edit>/reels_transcripts --backend groq --language ru`.
+3. Inspect the word list around the requested range. Choose final boundaries on
+   the first and last complete words, then add a small 30-200ms pad when useful.
+   Do not cut on the user's approximate timestamp if it lands inside a word or
+   in the tail of another speaker's phrase.
+4. Keep each final clip inside the user's requested duration band. For typical
+   Reels batches this means 10-59 seconds unless the user says otherwise.
+5. Create one EDL per final clip in `<edit>/`, with a `reason` documenting that
+   boundaries were selected from the transcript.
+6. Render through `render.py`, not ad-hoc ffmpeg, so fades, loudnorm, and the
+   rest of the video-use pipeline stay consistent.
+7. Verify every output with `ffprobe` and a contact sheet/frame sample before
+   presenting it. If a crop catches the shared screen or another speaker instead
+   of the requested person, fix and re-render.
+
+For 9:16 output use `grade` as a raw ffmpeg filter chain. The crop is part of
+the creative/technical decision, not a universal constant:
+
+- **Main gallery / non-screen-share camera tile:** identify the speaker's tile
+  in a frame, crop out other participants and Zoom controls, then scale to
+  `1080:1920,setsar=1`.
+- **Screen-share layout:** do not use the center of the full frame. The active
+  speaker may be a small tile on the right. Crop that tile directly and scale it
+  to Reels. Validate with a frame from the actual clip, because the speaker may
+  lean left/right in different segments.
+- **No Zoom UI in the final crop.** Remove bottom control bars, speaker labels,
+  green borders where possible, whiteboard/toolbars, and fragments of other
+  people. If removing every border would cut the face, prioritize a clean face
+  and avoid visible buttons/labels.
+
+Worked crop examples from a 2560x1440 Zoom recording after `scale=1920:-2`:
+
+```
+# Main camera tile: clean center speaker, no lower Zoom controls.
+crop=472:840:735:100,scale=1080:1920,setsar=1
+
+# Screen-share right speaker tile: clean portrait from the right rail.
+crop=152:270:1664:400,scale=1080:1920,setsar=1
+
+# Same layout, speaker leaning right.
+crop=152:270:1725:400,scale=1080:1920,setsar=1
+```
+
+These numbers are examples only. Always sample a source frame and adjust for
+the actual recording layout.
 
 ## The packed transcript (primary reading view)
 
@@ -178,6 +235,37 @@ Hard rules: apply **per-segment during extraction** (not post-concat, which re-e
 ## Subtitles (when requested)
 
 Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content.
+
+For Reels/TikTok/Shorts, do **not** blindly burn raw ASR text. ASR commonly
+turns domain words into plausible nonsense. Manually review and correct terms
+before rendering, especially product names, model names, Russian/English mixed
+phrases, acronyms, and domain vocabulary. Example: if the context is open-source
+models, correct ASR like `консорсная модель` to `опенсорсная модель`.
+
+Recommended short-form caption style:
+
+- Placement: lower-middle safe zone, not the top of the frame and not at the
+  very bottom where Reels/TikTok UI covers it. In ASS/libass use bottom
+  alignment (`Alignment=2`) with a moderate bottom margin, e.g. `MarginV=60-90`
+  for 1080x1920. Increase margin if the platform UI or face/chest overlap.
+- Typography: bold sans-serif, white text, strong black outline, no decorative
+  font. Arial/Helvetica bold is acceptable when no brand font is configured.
+- Chunking: short readable phrases, usually 4-6 words or up to two lines.
+  Preserve meaning over exact ASR chunk boundaries.
+- Text: uppercase is acceptable for punchy social clips, but keep line length
+  short. Mixed technical terms like `INFERENCE`, `MCP`, `API`, `OPENSOURCE` may
+  stay uppercase; Russian terms should be semantically corrected.
+- Verify with at least one frame where subtitles are active. A frame between
+  cues proves nothing.
+
+Example ASS style for Reels captions:
+
+```
+FontName=Arial,FontSize=10,Bold=1,
+PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,
+BorderStyle=1,Outline=2.4,Shadow=0,
+Alignment=2,MarginV=64
+```
 
 **Worked styles** — pick, adapt, or invent:
 

@@ -1,8 +1,8 @@
-"""Transcribe a video with ElevenLabs Scribe.
+"""Transcribe a video with Groq Whisper or ElevenLabs Scribe.
 
-Extracts mono 16kHz audio via ffmpeg, uploads to Scribe with verbatim +
-diarize + audio events + word-level timestamps, writes the full response
-to <edit_dir>/transcripts/<video_stem>.json.
+Extracts mono 16kHz audio via ffmpeg, uploads to the configured backend
+with word-level timestamps, writes a normalized response to
+<edit_dir>/transcripts/<video_stem>.json.
 
 Cached: if the output file already exists, the upload is skipped.
 
@@ -28,9 +28,12 @@ import requests
 
 
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+DEFAULT_GROQ_MODEL = "whisper-large-v3-turbo"
 
 
-def load_api_key() -> str:
+def load_env_values() -> dict[str, str]:
+    values: dict[str, str] = {}
     for candidate in [Path(__file__).resolve().parent.parent / ".env", Path(".env")]:
         if candidate.exists():
             for line in candidate.read_text().splitlines():
@@ -38,12 +41,101 @@ def load_api_key() -> str:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                if k.strip() == "ELEVENLABS_API_KEY":
-                    return v.strip().strip('"').strip("'")
-    v = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not v:
-        sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
-    return v
+                values[k.strip()] = v.strip().strip('"').strip("'")
+    return values
+
+
+def load_transcription_config() -> tuple[str, str, str | None]:
+    env_file = load_env_values()
+    backend = (
+        os.environ.get("TRANSCRIPTION_BACKEND")
+        or os.environ.get("VIDEO_USE_TRANSCRIBE_BACKEND")
+        or env_file.get("TRANSCRIPTION_BACKEND")
+        or env_file.get("VIDEO_USE_TRANSCRIBE_BACKEND")
+        or ""
+    ).strip().lower()
+
+    groq_key = env_file.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+    elevenlabs_key = env_file.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVENLABS_API_KEY", "")
+
+    if not backend:
+        backend = "groq" if groq_key else "elevenlabs"
+
+    if backend == "groq":
+        if not groq_key:
+            sys.exit("GROQ_API_KEY not found in .env or environment")
+        model = (
+            os.environ.get("GROQ_TRANSCRIPTION_MODEL")
+            or env_file.get("GROQ_TRANSCRIPTION_MODEL")
+            or DEFAULT_GROQ_MODEL
+        )
+        return backend, groq_key, model
+
+    if backend in {"elevenlabs", "scribe"}:
+        if not elevenlabs_key:
+            sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
+        return "elevenlabs", elevenlabs_key, None
+
+    sys.exit(f"unsupported TRANSCRIPTION_BACKEND: {backend}")
+
+
+def load_api_key() -> str:
+    """Backward-compatible key loader for older callers."""
+    _backend, api_key, _model = load_transcription_config()
+    return api_key
+
+
+def normalize_groq_payload(payload: dict, model: str) -> dict:
+    words = []
+    for w in payload.get("words", []) or []:
+        text = (w.get("word") or w.get("text") or "").strip()
+        if not text:
+            continue
+        words.append({
+            "type": "word",
+            "text": text,
+            "start": w.get("start"),
+            "end": w.get("end"),
+        })
+    return {
+        "provider": "groq",
+        "model": model,
+        "text": payload.get("text", ""),
+        "words": words,
+        "segments": payload.get("segments", []),
+        "raw": payload,
+    }
+
+
+def call_groq(
+    audio_path: Path,
+    api_key: str,
+    model: str,
+    language: str | None = None,
+) -> dict:
+    data: list[tuple[str, str]] = [
+        ("model", model),
+        ("response_format", "verbose_json"),
+        ("temperature", "0"),
+        ("timestamp_granularities[]", "word"),
+        ("timestamp_granularities[]", "segment"),
+    ]
+    if language:
+        data.append(("language", language))
+
+    with open(audio_path, "rb") as f:
+        resp = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (audio_path.name, f, "audio/wav")},
+            data=data,
+            timeout=1800,
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Groq returned {resp.status_code}: {resp.text[:500]}")
+
+    return normalize_groq_payload(resp.json(), model)
 
 
 def extract_audio(video_path: Path, dest: Path) -> None:
@@ -93,6 +185,8 @@ def transcribe_one(
     api_key: str,
     language: str | None = None,
     num_speakers: int | None = None,
+    backend: str = "elevenlabs",
+    model: str | None = None,
     verbose: bool = True,
 ) -> Path:
     """Transcribe a single video. Returns path to transcript JSON.
@@ -117,8 +211,11 @@ def transcribe_one(
         extract_audio(video, audio)
         size_mb = audio.stat().st_size / (1024 * 1024)
         if verbose:
-            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
-        payload = call_scribe(audio, api_key, language, num_speakers)
+            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB) to {backend}", flush=True)
+        if backend == "groq":
+            payload = call_groq(audio, api_key, model or DEFAULT_GROQ_MODEL, language)
+        else:
+            payload = call_scribe(audio, api_key, language, num_speakers)
 
     out_path.write_text(json.dumps(payload, indent=2))
     dt = time.time() - t0
@@ -133,7 +230,7 @@ def transcribe_one(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Transcribe a video with ElevenLabs Scribe")
+    ap = argparse.ArgumentParser(description="Transcribe a video with Groq Whisper or ElevenLabs Scribe")
     ap.add_argument("video", type=Path, help="Path to video file")
     ap.add_argument(
         "--edit-dir",
@@ -151,7 +248,18 @@ def main() -> None:
         "--num-speakers",
         type=int,
         default=None,
-        help="Optional number of speakers when known. Improves diarization accuracy.",
+        help="Optional number of speakers when using ElevenLabs. Groq ignores this.",
+    )
+    ap.add_argument(
+        "--backend",
+        choices=["groq", "elevenlabs"],
+        default=None,
+        help="Transcription backend. Default: TRANSCRIPTION_BACKEND, else Groq when GROQ_API_KEY exists.",
+    )
+    ap.add_argument(
+        "--groq-model",
+        default=None,
+        help=f"Groq transcription model (default: {DEFAULT_GROQ_MODEL}).",
     )
     args = ap.parse_args()
 
@@ -160,7 +268,19 @@ def main() -> None:
         sys.exit(f"video not found: {video}")
 
     edit_dir = (args.edit_dir or (video.parent / "edit")).resolve()
-    api_key = load_api_key()
+    backend, api_key, model = load_transcription_config()
+    if args.backend:
+        backend = args.backend
+        if backend == "groq":
+            api_key = load_env_values().get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY", "")
+            model = args.groq_model or model or DEFAULT_GROQ_MODEL
+        else:
+            api_key = load_env_values().get("ELEVENLABS_API_KEY") or os.environ.get("ELEVENLABS_API_KEY", "")
+            model = None
+        if not api_key:
+            sys.exit(f"{backend.upper()} API key not found in .env or environment")
+    elif args.groq_model:
+        model = args.groq_model
 
     transcribe_one(
         video=video,
@@ -168,6 +288,8 @@ def main() -> None:
         api_key=api_key,
         language=args.language,
         num_speakers=args.num_speakers,
+        backend=backend,
+        model=model,
     )
 
 

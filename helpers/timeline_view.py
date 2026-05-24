@@ -35,15 +35,17 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 def extract_frames(video: Path, start: float, end: float, n: int, dest_dir: Path) -> list[Path]:
-    """Extract N frames evenly spaced across [start, end]. Returns paths in order."""
+    """Extract N frames evenly spaced inside [start, end]. Returns paths in order."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     if n < 1:
         n = 1
     if n == 1:
         times = [(start + end) / 2.0]
     else:
-        step = (end - start) / (n - 1)
-        times = [start + i * step for i in range(n)]
+        # Sampling exactly at `end` can fail on short clips because there may be
+        # no decodable frame at the exclusive media boundary.
+        step = (end - start) / n
+        times = [start + (i + 0.5) * step for i in range(n)]
 
     paths: list[Path] = []
     for i, t in enumerate(times):

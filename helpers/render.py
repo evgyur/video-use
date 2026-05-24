@@ -60,7 +60,7 @@ SUB_FORCE_STYLE = (
 
 def run(cmd: list[str], quiet: bool = False) -> None:
     if not quiet:
-        print(f"  $ {' '.join(str(c) for c in cmd[:6])}{' …' if len(cmd) > 6 else ''}")
+        print(f"  $ {' '.join(str(c) for c in cmd[:6])}{' ...' if len(cmd) > 6 else ''}")
     subprocess.run(cmd, check=True)
 
 
@@ -235,7 +235,7 @@ def extract_all_segments(
     sources = edl["sources"]
 
     seg_paths: list[Path] = []
-    print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
+    print(f"extracting {len(ranges)} segment(s) -> {clips_dir.name}/")
     if is_auto:
         print("  (auto-grade per segment: analyzing each range)")
     for i, r in enumerate(ranges):
@@ -278,7 +278,7 @@ def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -
         "-movflags", "+faststart",
         str(out_path),
     ]
-    print(f"concat → {out_path.name}")
+    print(f"concat -> {out_path.name}")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     concat_list.unlink(missing_ok=True)
 
@@ -381,7 +381,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
         lines.append(t)
         lines.append("")
     out_path.write_text("\n".join(lines))
-    print(f"master SRT → {out_path.name} ({len(entries)} cues)")
+    print(f"master SRT -> {out_path.name} ({len(entries)} cues)")
 
 
 # -------- Loudness normalization (social-ready audio) -----------------------
@@ -453,7 +453,7 @@ def apply_loudnorm_two_pass(
             "-movflags", "+faststart",
             str(output_path),
         ]
-        print(f"  loudnorm (1-pass preview) → {output_path.name}")
+        print(f"  loudnorm (1-pass preview) -> {output_path.name}")
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         return True
 
@@ -461,7 +461,7 @@ def apply_loudnorm_two_pass(
     print(f"  loudnorm pass 1: measuring {input_path.name}")
     measurement = measure_loudness(input_path)
     if measurement is None:
-        print("  loudnorm measurement failed — falling back to 1-pass")
+        print("  loudnorm measurement failed - falling back to 1-pass")
         return apply_loudnorm_two_pass(input_path, output_path, preview=True)
 
     print(f"    measured: I={measurement['input_i']} LUFS  "
@@ -485,7 +485,7 @@ def apply_loudnorm_two_pass(
         "-movflags", "+faststart",
         str(output_path),
     ]
-    print(f"  loudnorm pass 2: normalizing → {output_path.name}")
+    print(f"  loudnorm pass 2: normalizing -> {output_path.name}")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return True
 
@@ -564,7 +564,7 @@ def build_final_composite(
         "-movflags", "+faststart",
         str(out_path),
     ]
-    print(f"compositing → {out_path.name}")
+    print(f"compositing -> {out_path.name}")
     print(f"  overlays: {len(overlays)}, subtitles: {'yes' if has_subs else 'no'}")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -579,12 +579,12 @@ def main() -> None:
     ap.add_argument(
         "--preview",
         action="store_true",
-        help="Preview mode: 1080p, medium, CRF 22 — evaluable for QC, faster than final.",
+        help="Preview mode: 1080p, medium, CRF 22 - evaluable for QC, faster than final.",
     )
     ap.add_argument(
         "--draft",
         action="store_true",
-        help="Draft mode: 720p, ultrafast, CRF 28 — cut-point verification only.",
+        help="Draft mode: 720p, ultrafast, CRF 28 - cut-point verification only.",
     )
     ap.add_argument(
         "--build-subtitles",
@@ -607,7 +607,7 @@ def main() -> None:
     if not edl_path.exists():
         sys.exit(f"edl not found: {edl_path}")
 
-    edl = json.loads(edl_path.read_text())
+    edl = json.loads(edl_path.read_text(encoding="utf-8-sig"))
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 
@@ -647,7 +647,7 @@ def main() -> None:
         # Composite to a temp file, then run loudnorm → final output
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
         build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
-        print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
+        print("loudness normalization -> social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
         tmp_composite.unlink(missing_ok=True)
 
