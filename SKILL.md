@@ -242,29 +242,45 @@ before rendering, especially product names, model names, Russian/English mixed
 phrases, acronyms, and domain vocabulary. Example: if the context is open-source
 models, correct ASR like `консорсная модель` to `опенсорсная модель`.
 
+If the user asks for subtitles that match speech, use **verbatim subtitles**:
+
+- Do not turn speech into caption-style summaries.
+- Do not shorten, polish, or rephrase for punch.
+- Keep spoken fillers, repeats, false starts, connective words, and unfinished
+  endings unless the user explicitly asks for cleaned captions.
+- Correct only clear ASR/domain mistakes after comparing context and, when
+  useful, multiple ASR backends. Examples from Russian AI calls: `опенсорсная`,
+  `ЦОДы`, `инференс`, `мэчить`, `AGENT-FIRST`, `HERMES 5.5`.
+- For hard clips, transcribe the already-rendered Reel, not only the source
+  window, so subtitle timings match the final MP4 exactly.
+
 Recommended short-form caption style:
 
-- Placement: lower-middle safe zone, not the top of the frame and not at the
-  very bottom where Reels/TikTok UI covers it. In ASS/libass use bottom
-  alignment (`Alignment=2`) with a moderate bottom margin, e.g. `MarginV=60-90`
-  for 1080x1920. Increase margin if the platform UI or face/chest overlap.
+- Placement: never cover the speaker's mouth. For tight talking-head Reels,
+  place subtitles on the shirt / lower torso area, not across the face. In
+  ASS/libass use bottom alignment (`Alignment=2`) with a low bottom margin,
+  e.g. `MarginV=20-30` for this Zoom talking-head crop. Increase only if
+  platform UI or the video composition requires it.
 - Typography: bold sans-serif, white text, strong black outline, no decorative
   font. Arial/Helvetica bold is acceptable when no brand font is configured.
 - Chunking: short readable phrases, usually 4-6 words or up to two lines.
-  Preserve meaning over exact ASR chunk boundaries.
-- Text: uppercase is acceptable for punchy social clips, but keep line length
-  short. Mixed technical terms like `INFERENCE`, `MCP`, `API`, `OPENSOURCE` may
-  stay uppercase; Russian terms should be semantically corrected.
+  For verbatim subtitles, preserve the words exactly and only choose where to
+  wrap them.
+- Text: uppercase is acceptable only when it does not reduce readability or
+  imply a rewrite. Mixed technical terms like `INFERENCE`, `MCP`, `API`,
+  `OPENSOURCE` may stay uppercase; Russian terms should be semantically
+  corrected.
 - Verify with at least one frame where subtitles are active. A frame between
   cues proves nothing.
 
-Example ASS style for Reels captions:
+Example ASS style for tight talking-head Reels where subtitles must stay below
+the mouth:
 
 ```
-FontName=Arial,FontSize=10,Bold=1,
+FontName=Arial,FontSize=8,Bold=1,
 PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,
-BorderStyle=1,Outline=2.4,Shadow=0,
-Alignment=2,MarginV=64
+BorderStyle=1,Outline=2.2,Shadow=0,
+Alignment=2,MarginV=22
 ```
 
 **Worked styles** — pick, adapt, or invent:
