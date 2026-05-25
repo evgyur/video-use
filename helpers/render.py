@@ -64,6 +64,21 @@ def run(cmd: list[str], quiet: bool = False) -> None:
     subprocess.run(cmd, check=True)
 
 
+def run_quiet(cmd: list[str]) -> None:
+    """Run an ffmpeg/ffprobe-style command and print useful stderr on failure."""
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        stderr_tail = "\n".join((proc.stderr or "").splitlines()[-80:])
+        print("ffmpeg command failed:", file=sys.stderr)
+        print(
+            "  " + " ".join(str(c) for c in cmd[:12]) + (" ..." if len(cmd) > 12 else ""),
+            file=sys.stderr,
+        )
+        if stderr_tail:
+            print(stderr_tail, file=sys.stderr)
+        raise subprocess.CalledProcessError(proc.returncode, cmd, stderr=proc.stderr)
+
+
 def resolve_grade_filter(grade_field: str | None) -> str:
     """The EDL's 'grade' field can be a preset name, a raw ffmpeg filter, or 'auto'.
 
@@ -104,6 +119,24 @@ def media_duration(path: Path) -> float:
         capture_output=True, text=True, check=True,
     )
     return float(out.stdout.strip())
+
+
+def has_audio_stream(path: Path) -> bool:
+    """Return True if the media file has at least one audio stream."""
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        return bool(out.stdout.strip())
+    except subprocess.CalledProcessError:
+        return False
 
 
 # -------- HDR → SDR tone mapping (HLG / PQ sources) --------------------------
@@ -222,7 +255,7 @@ def extract_segment(
         "-movflags", "+faststart",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    run_quiet(cmd)
 
 
 def extract_all_segments(
@@ -293,7 +326,7 @@ def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -
         str(out_path),
     ]
     print(f"concat -> {out_path.name}")
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    run_quiet(cmd)
     concat_list.unlink(missing_ok=True)
 
 
@@ -468,7 +501,7 @@ def apply_loudnorm_two_pass(
             str(output_path),
         ]
         print(f"  loudnorm (1-pass preview) -> {output_path.name}")
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        run_quiet(cmd)
         return True
 
     # Full two-pass
@@ -500,7 +533,7 @@ def apply_loudnorm_two_pass(
         str(output_path),
     ]
     print(f"  loudnorm pass 2: normalizing -> {output_path.name}")
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    run_quiet(cmd)
     return True
 
 
@@ -583,16 +616,19 @@ def build_final_composite(
         else:
             out_label = "0:v"
 
-    audio_label = "0:a"
+    base_has_audio = has_audio_stream(base_path)
+    audio_label: str | None = "0:a" if base_has_audio else None
     if has_music and music_input_idx is not None:
+        assert music is not None
         duration = media_duration(base_path)
         volume = float(music.get("volume", 0.08))
         fade_in = max(0.0, float(music.get("fade_in", 0.8)))
         fade_out = max(0.0, float(music.get("fade_out", 1.2)))
         start = max(0.0, float(music.get("start", 0.0)))
         fade_out_start = max(0.0, duration - fade_out)
-        duck = bool(music.get("duck_under_voice", True))
-        filter_parts.append("[0:a]aformat=sample_rates=48000:channel_layouts=stereo[voice]")
+        duck = bool(music.get("duck_under_voice", True)) and base_has_audio
+        if base_has_audio:
+            filter_parts.append("[0:a]aformat=sample_rates=48000:channel_layouts=stereo[voice]")
         music_chain = (
             f"[{music_input_idx}:a]"
             f"atrim=start={start:.3f}:duration={duration:.3f},"
@@ -617,8 +653,10 @@ def build_final_composite(
                 f"attack={attack}:release={release}[ducked]"
             )
             filter_parts.append("[voice_mix][ducked]amix=inputs=2:duration=first:normalize=0[outa]")
-        else:
+        elif base_has_audio:
             filter_parts.append("[voice][music]amix=inputs=2:duration=first:normalize=0[outa]")
+        else:
+            filter_parts.append("[music]anull[outa]")
         audio_label = "[outa]"
 
     filter_complex = ";".join(filter_parts)
@@ -628,23 +666,25 @@ def build_final_composite(
         *inputs,
         "-filter_complex", filter_complex,
         "-map", out_label,
-        "-map", audio_label,
     ]
+    if audio_label is not None:
+        cmd += ["-map", audio_label]
     if has_video_filters:
         cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]
     else:
         cmd += ["-c:v", "copy"]
-    if has_music:
-        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
-    else:
-        cmd += ["-c:a", "copy"]
+    if audio_label is not None:
+        if has_music:
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+        else:
+            cmd += ["-c:a", "copy"]
     cmd += ["-movflags", "+faststart", str(out_path)]
     print(f"compositing -> {out_path.name}")
     print(
         f"  overlays: {len(overlays)}, subtitles: {'yes' if has_subs else 'no'}, "
         f"music: {'yes' if has_music else 'no'}"
     )
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    run_quiet(cmd)
 
 
 # -------- Main ---------------------------------------------------------------
@@ -732,8 +772,12 @@ def main() -> None:
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
         build_final_composite(base_path, overlays, subs_path, music, tmp_composite, edit_dir)
         print("loudness normalization -> social-ready (-14 LUFS / -1 dBTP / LRA 11)")
-        apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
-        tmp_composite.unlink(missing_ok=True)
+        if has_audio_stream(tmp_composite):
+            apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
+            tmp_composite.unlink(missing_ok=True)
+        else:
+            print("  skipped: rendered output has no audio stream")
+            tmp_composite.replace(out_path)
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
     print(f"\ndone: {out_path} ({size_mb:.1f} MB)")
