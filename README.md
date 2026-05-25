@@ -14,6 +14,8 @@ Drop raw footage in a folder, chat with Claude Code, get `final.mp4` back. Works
 - **Auto color grades** every segment (warm cinematic, neutral punch, or any custom ffmpeg chain)
 - **30ms audio fades** at every cut so you never hear a pop
 - **Burns subtitles** in your style — 2-word UPPERCASE chunks by default, fully customizable
+- **Renders kinetic caption overlays** for Reels-style captions where words appear one by one
+- **Mixes background music** from your own files with optional voice ducking
 - **Generates animation overlays** via [HyperFrames](https://github.com/heygen-com/hyperframes), [Remotion](https://www.remotion.dev/), [Manim](https://www.manim.community/), or PIL — spawned in parallel sub-agents, one per animation
 - **Self-evaluates the rendered output** at every cut boundary before showing you anything
 - **Persists session memory** in `project.md` so next week's session picks up where you left off
@@ -108,3 +110,42 @@ The self-eval loop runs `timeline_view` on the _rendered output_ at every cut bo
 5. **12 hard rules, artistic freedom elsewhere.** Production-correctness is non-negotiable. Taste isn't.
 
 See [`SKILL.md`](./SKILL.md) for the full production rules and editing craft.
+
+## Optional: kinetic captions + music
+
+For social clips that need animated word-by-word captions, render a transparent
+overlay from the EDL and cached transcripts:
+
+```bash
+python helpers/kinetic_captions.py edit/edl.json \
+  --style presets/kinetic_reels.json \
+  -o edit/kinetic_captions.mov
+```
+
+Then reference it as a normal overlay:
+
+```json
+{
+  "overlays": [
+    {"file": "kinetic_captions.mov", "start_in_output": 0, "duration": 39.5}
+  ]
+}
+```
+
+To add quiet background music from your own local files:
+
+```json
+{
+  "music": {
+    "file": "music/background.mp3",
+    "volume": 0.08,
+    "loop": true,
+    "fade_in": 0.8,
+    "fade_out": 1.2,
+    "duck_under_voice": true
+  }
+}
+```
+
+`helpers/select_music.py` can pick a track from a local folder with simple
+round-robin history; it does not include or download any music.
