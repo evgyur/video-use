@@ -1,0 +1,29 @@
+{
+  "width": 1080,
+  "height": 1920,
+  "fps": 24,
+  "max_visible_words": 5,
+  "max_lines": 2,
+  "center_y": 1510,
+  "max_block_width": 780,
+  "font": "DejaVuSans-Bold.ttf",
+  "case": "uppercase",
+  "base_font_px": 82,
+  "emphasis_scale": 1.12,
+  "emphasis_words": [],
+  "line_height": 0.9,
+  "word_spacing_px": 18,
+  "fill": "#F7F7F2",
+  "settling_fill": "#CFCFC8",
+  "stroke": "#050505",
+  "stroke_px": 7,
+  "shadow_opacity": 0.55,
+  "entry_ms": 140,
+  "exit_ms": 110,
+  "group_gap_s": 0.45,
+  "protective_gradient": {
+    "enabled": true,
+    "bottom_opacity": 0.52,
+    "fade_to_y_ratio": 0.6
+  }
+}

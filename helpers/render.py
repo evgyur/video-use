@@ -92,6 +92,20 @@ def resolve_path(maybe_path: str, base: Path) -> Path:
     return (base / p).resolve()
 
 
+def media_duration(path: Path) -> float:
+    """Return media duration in seconds using ffprobe."""
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return float(out.stdout.strip())
+
+
 # -------- HDR → SDR tone mapping (HLG / PQ sources) --------------------------
 #
 # iPhone defaults to HLG HDR in Rec.2020 (and many mirrorless cameras ship PQ).
@@ -497,17 +511,20 @@ def build_final_composite(
     base_path: Path,
     overlays: list[dict],
     subtitles_path: Path | None,
+    music: dict | None,
     out_path: Path,
     edit_dir: Path,
 ) -> None:
-    """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
+    """Final pass: base -> overlays (PTS-shifted) -> subtitles LAST -> audio -> out.
 
-    If there are no overlays and no subtitles, just copy base to out.
+    If there are no overlays, subtitles, or music, just copy base to out.
     """
     has_overlays = bool(overlays)
     has_subs = subtitles_path is not None and subtitles_path.exists()
+    has_music = bool(music and music.get("file"))
+    has_video_filters = has_overlays or has_subs
 
-    if not has_overlays and not has_subs:
+    if not has_video_filters and not has_music:
         # Nothing to do — just rename/copy base to final name
         run(["ffmpeg", "-y", "-i", str(base_path), "-c", "copy", str(out_path)], quiet=True)
         return
@@ -516,6 +533,22 @@ def build_final_composite(
     for ov in overlays:
         ov_path = resolve_path(ov["file"], edit_dir)
         inputs += ["-i", str(ov_path)]
+
+    music_input_idx: int | None = None
+    if has_music:
+        music_path = resolve_path(str(music["file"]), edit_dir)
+        if not music_path.exists():
+            print(f"warning: music file in EDL does not exist: {music_path}")
+            has_music = False
+        else:
+            music_input_idx = 1 + len(overlays)
+            if music.get("loop", True):
+                inputs += ["-stream_loop", "-1"]
+            inputs += ["-i", str(music_path)]
+
+    if not has_video_filters and not has_music:
+        run(["ffmpeg", "-y", "-i", str(base_path), "-c", "copy", str(out_path)], quiet=True)
+        return
 
     filter_parts: list[str] = []
     # PTS-shift every overlay so its frame 0 lands at start_in_output
@@ -548,7 +581,45 @@ def build_final_composite(
             filter_parts.append(f"{current}null[outv]")
             out_label = "[outv]"
         else:
-            out_label = "[0:v]"
+            out_label = "0:v"
+
+    audio_label = "0:a"
+    if has_music and music_input_idx is not None:
+        duration = media_duration(base_path)
+        volume = float(music.get("volume", 0.08))
+        fade_in = max(0.0, float(music.get("fade_in", 0.8)))
+        fade_out = max(0.0, float(music.get("fade_out", 1.2)))
+        start = max(0.0, float(music.get("start", 0.0)))
+        fade_out_start = max(0.0, duration - fade_out)
+        duck = bool(music.get("duck_under_voice", True))
+        filter_parts.append("[0:a]aformat=sample_rates=48000:channel_layouts=stereo[voice]")
+        music_chain = (
+            f"[{music_input_idx}:a]"
+            f"atrim=start={start:.3f}:duration={duration:.3f},"
+            "asetpts=PTS-STARTPTS,"
+            "aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"volume={volume:.4f}"
+        )
+        if fade_in > 0:
+            music_chain += f",afade=t=in:st=0:d={fade_in:.3f}"
+        if fade_out > 0:
+            music_chain += f",afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
+        music_chain += "[music]"
+        filter_parts.append(music_chain)
+        if duck:
+            threshold = float(music.get("duck_threshold", 0.025))
+            ratio = float(music.get("duck_ratio", 6.0))
+            attack = float(music.get("duck_attack", 40.0))
+            release = float(music.get("duck_release", 250.0))
+            filter_parts.append("[voice]asplit=2[voice_mix][voice_key]")
+            filter_parts.append(
+                f"[music][voice_key]sidechaincompress=threshold={threshold}:ratio={ratio}:"
+                f"attack={attack}:release={release}[ducked]"
+            )
+            filter_parts.append("[voice_mix][ducked]amix=inputs=2:duration=first:normalize=0[outa]")
+        else:
+            filter_parts.append("[voice][music]amix=inputs=2:duration=first:normalize=0[outa]")
+        audio_label = "[outa]"
 
     filter_complex = ";".join(filter_parts)
 
@@ -557,15 +628,22 @@ def build_final_composite(
         *inputs,
         "-filter_complex", filter_complex,
         "-map", out_label,
-        "-map", "0:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        str(out_path),
+        "-map", audio_label,
     ]
+    if has_video_filters:
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]
+    else:
+        cmd += ["-c:v", "copy"]
+    if has_music:
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    else:
+        cmd += ["-c:a", "copy"]
+    cmd += ["-movflags", "+faststart", str(out_path)]
     print(f"compositing -> {out_path.name}")
-    print(f"  overlays: {len(overlays)}, subtitles: {'yes' if has_subs else 'no'}")
+    print(
+        f"  overlays: {len(overlays)}, subtitles: {'yes' if has_subs else 'no'}, "
+        f"music: {'yes' if has_music else 'no'}"
+    )
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
@@ -595,6 +673,11 @@ def main() -> None:
         "--no-subtitles",
         action="store_true",
         help="Skip subtitles even if the EDL references one",
+    )
+    ap.add_argument(
+        "--no-music",
+        action="store_true",
+        help="Skip EDL background music",
     )
     ap.add_argument(
         "--no-loudnorm",
@@ -640,13 +723,14 @@ def main() -> None:
 
     # 4. Composite (overlays + subtitles LAST) → intermediate (pre-loudnorm) path
     overlays = edl.get("overlays") or []
+    music = None if args.no_music else edl.get("music")
     if args.no_loudnorm:
         # Composite directly to final output
-        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir)
+        build_final_composite(base_path, overlays, subs_path, music, out_path, edit_dir)
     else:
         # Composite to a temp file, then run loudnorm → final output
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
-        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
+        build_final_composite(base_path, overlays, subs_path, music, tmp_composite, edit_dir)
         print("loudness normalization -> social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
         tmp_composite.unlink(missing_ok=True)

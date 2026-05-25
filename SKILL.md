@@ -77,6 +77,8 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`kinetic_captions.py <edl.json> -o <out.mov>`** — transparent word-by-word caption overlay from EDL + cached transcripts. Use for Reels/TikTok style captions that need per-word motion, variable sizing, or accumulation up to N words.
+- **`select_music.py <music_dir>`** — optional local round-robin music picker. It only chooses from user-provided files and writes a small history JSON.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -298,6 +300,62 @@ Alignment=2,MarginV=35
 
 Invent a third style if neither fits. Hard rules: subtitles LAST (Rule 1), output-timeline offsets (Rule 5).
 
+### Kinetic caption overlays
+
+When the user wants captions that appear word by word, accumulate on screen,
+change individual word size, or animate with per-word motion, use a rendered
+caption overlay instead of plain SRT. Plain SRT/libass is excellent for stable
+subtitles; it is not the right surface for kinetic typography.
+
+Workflow:
+
+1. Make sure `edit/transcripts/<source>.json` exists for every EDL source.
+2. Render the overlay:
+
+   ```bash
+   python helpers/kinetic_captions.py edit/edl.json \
+     --style presets/kinetic_reels.json \
+     -o edit/kinetic_captions.mov
+   ```
+
+3. Add the overlay to the EDL:
+
+   ```json
+   {"file": "kinetic_captions.mov", "start_in_output": 0.0, "duration": 39.5}
+   ```
+
+4. Render through `render.py` as usual. If simple SRT subtitles are also used,
+   `render.py` still applies them last; avoid doubling captions unless there is
+   a deliberate reason.
+
+Default kinetic behavior: reveal words in speech order, add 1-2 new words per
+beat, keep up to 5 visible words, then clear and start the next group. Override
+font, size, position, colors, stroke, gradient, and emphasis words in a style
+JSON.
+
+## Background music (when requested)
+
+Use user-provided music files only. Do not vendor tracks into this repository.
+For a quiet music bed under speech, add a `music` block to the EDL:
+
+```json
+"music": {
+  "file": "music/background.mp3",
+  "volume": 0.08,
+  "loop": true,
+  "fade_in": 0.8,
+  "fade_out": 1.2,
+  "duck_under_voice": true
+}
+```
+
+Guidelines:
+
+- Voice stays primary. Start around `volume=0.06-0.10`; go to `0.12` only if speech remains clear.
+- Prefer instrumental tracks or sparse vocals; busy lead vocals fight narration.
+- Use `duck_under_voice=true` for talking-head or interview content.
+- Use `helpers/select_music.py <music_dir> --history edit/music-history.json` if the user wants simple round-robin rotation across a local track folder.
+
 ## Animations (when requested)
 
 Animations match the content and the brand. **Get the palette, font, and visual language from the conversation** — never assume a default. If the user hasn't told you, propose a palette in the strategy phase and wait for confirmation before building anything.
@@ -386,11 +444,19 @@ Match the source unless the user asked for something specific. Common targets: `
     {"file": "edit/animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
   ],
   "subtitles": "edit/master.srt",
+  "music": {
+    "file": "edit/music/background.mp3",
+    "volume": 0.08,
+    "loop": true,
+    "fade_in": 0.8,
+    "fade_out": 1.2,
+    "duck_under_voice": true
+  },
   "total_duration_s": 87.4
 }
 ```
 
-`grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
+`grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST. `music` is optional and mixes a user-provided audio file under the rendered voice track.
 
 ## Memory — `project.md`
 
